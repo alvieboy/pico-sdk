@@ -25,6 +25,10 @@
 #include "pico/stdio_usb.h"
 #endif
 
+#if LIB_PICO_VFS
+#include "pico/vfs.h"
+#endif
+
 #if LIB_PICO_STDIO_SEMIHOSTING
 #include "pico/stdio_semihosting.h"
 #endif
@@ -164,16 +168,24 @@ int puts_raw(const char *s) {
     return len;
 }
 
+#if LIB_PICO_VFS
+ssize_t stdio_vfs_read(int handle, void *buffer, size_t length) {
+#else
 int _read(int handle, char *buffer, int length) {
+#endif
     if (handle == 0) {
-        return stdio_get_until(buffer, length, at_the_end_of_time);
+        return stdio_get_until((char*)buffer, length, at_the_end_of_time);
     }
     return -1;
 }
 
+#if LIB_PICO_VFS
+ssize_t stdio_vfs_write(int handle, const void *buffer, size_t length) {
+#else
 int _write(int handle, char *buffer, int length) {
+#endif
     if (handle == 1) {
-        stdio_put_string(buffer, length, false, false);
+        stdio_put_string((const char*)buffer, length, false, false);
         return length;
     }
     return -1;
@@ -261,6 +273,31 @@ int __printflike(1, 0) WRAPPER_FUNC(printf)(const char* format, ...)
     return ret;
 }
 
+#if LIB_PICO_VFS
+static void stdio_init_vfs()
+{
+    const pico_vfs_ops_t stdio_vfs_ops = {
+        .read = &stdio_vfs_read,
+        .write= &stdio_vfs_write
+    };
+
+    vfs_index_t rootindex = pico_vfs_init();
+
+    if (rootindex == 0)
+    {
+        if (pico_vfs_register_fd_range_for_vfs_index(rootindex, 0, 1) ==0)
+        {
+            pico_vfs_ops_t *ops = pico_vfs_get_vfs_for_index(rootindex);
+
+            if (ops) {
+                ops->read = &stdio_vfs_read;
+                ops->write = &stdio_vfs_write;
+            }
+        }
+    }
+}
+#endif
+
 void stdio_init_all(void) {
     // todo add explicit custom, or registered although you can call stdio_enable_driver explicitly anyway
     // These are well known ones
@@ -274,6 +311,10 @@ void stdio_init_all(void) {
 
 #if LIB_PICO_STDIO_USB
     stdio_usb_init();
+#endif
+
+#if LIB_PICO_VFS
+    stdio_init_vfs();
 #endif
 }
 
