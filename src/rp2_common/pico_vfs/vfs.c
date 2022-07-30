@@ -7,34 +7,36 @@
 #include <stdlib.h>
 #include <stdatomic.h>
 #include <sys/reent.h>
-
-extern struct _reent * __getreent (void);
+#include <stdio.h>
+#include <pico/sync.h>
 
 #define MAX_FDS 16
-#define ESP_VFS_PATH_MAX 16
 #define VFS_MAX_COUNT 4
 #define LEN_PATH_PREFIX_IGNORED SIZE_MAX /* special length value for VFS which is never recognised by open() */
 
-struct __dirstream
-{
-    vfs_index_t vfs_index;
-};
-
 typedef struct pico_vfs_fd_table_
 {
-    uint8_t vfs_index;
-    uint8_t local_fd;
+    int8_t vfs_index;
+    int8_t local_fd;
     bool permanent;
 } pico_vfs_fd_table_t;
 
 typedef struct pico_vfs_entry_ {
     pico_vfs_ops_t ops;
 
-    char path_prefix[ESP_VFS_PATH_MAX]; // path prefix mapped to this VFS
+    char path_prefix[PICO_VFS_BASE_PATH_MAX]; // path prefix mapped to this VFS
 
     size_t path_prefix_len; // micro-optimization to avoid doing extra strlen
     uint8_t index;             // index of this structure in s_vfs array
+    void *drvctx; // driver context
 } pico_vfs_entry_t;
+
+typedef struct pico_vfs_internal_dir_
+{
+    struct __dirstream stream;
+    struct dirent dir;
+    int8_t iter;
+} pico_vfs_internal_dir_t;
 
 #define FD_TABLE_ENTRY_UNUSED   (pico_vfs_fd_table_t) { .vfs_index = -1, .local_fd = -1, .permanent = false }
 
@@ -42,13 +44,26 @@ static pico_vfs_fd_table_t s_fd_table[MAX_FDS];
 static pico_vfs_entry_t* s_vfs[VFS_MAX_COUNT] = { 0 };
 static uint8_t s_vfs_count = 0;
 static bool vfs_initialised = false;
+static mutex_t s_fd_table_mutex;
 
 static inline void pico_vfs_table_lock()
 {
+    mutex_enter_blocking(&s_fd_table_mutex);
 }
 
 static inline void pico_vfs_table_unlock()
 {
+    mutex_exit(&s_fd_table_mutex);
+}
+
+int pico_vfs_concat_path(const char *path1, const char *path2,
+                         char *dest, size_t destlen)
+{
+    if (path1[0]=='/' && path1[1]=='\0') {
+        path1++;
+    }
+    return snprintf(dest, destlen, "%s/%s", path1, path2);
+
 }
 
 static const char* translate_path(const pico_vfs_entry_t* vfs, const char* src_path)
@@ -61,7 +76,7 @@ static const char* translate_path(const pico_vfs_entry_t* vfs, const char* src_p
     return src_path + vfs->path_prefix_len;
 }
 
-static const pico_vfs_entry_t* pico_vfs_get_vfs_for_path(const char* path)
+static const pico_vfs_entry_t* pico_vfs_get_vfs_entry_for_path(const char* path)
 {
     const pico_vfs_entry_t* best_match = NULL;
     ssize_t best_match_prefix_len = -1;
@@ -77,6 +92,11 @@ static const pico_vfs_entry_t* pico_vfs_get_vfs_for_path(const char* path)
         if (!vfs || vfs->path_prefix_len == LEN_PATH_PREFIX_IGNORED) {
             continue;
         }
+
+        printf("VFS compare index %d len=%d prefixlen=%d\r\n", i, len, vfs->path_prefix_len);
+        printf("VFS  = '%s' '%s'\r\n", path, vfs->path_prefix);
+
+
         // match path prefix
         if (len < vfs->path_prefix_len ||
             memcmp(path, vfs->path_prefix, vfs->path_prefix_len) != 0) {
@@ -104,10 +124,12 @@ static const pico_vfs_entry_t* pico_vfs_get_vfs_for_path(const char* path)
             best_match = vfs;
         }
     }
+    printf("VFS: return %s\r\n", best_match ? best_match->path_prefix : NULL);
+
     return best_match;
 }
 
-static inline const pico_vfs_entry_t *get_vfs_entry_for_index(int index)
+static inline const pico_vfs_entry_t *pico_vfs_get_vfs_entry_for_index(int index)
 {
     if (index < 0 || index >= s_vfs_count) {
         return NULL;
@@ -116,7 +138,7 @@ static inline const pico_vfs_entry_t *get_vfs_entry_for_index(int index)
     }
 }
 
-pico_vfs_ops_t *pico_vfs_get_vfs_for_index(int index)
+pico_vfs_ops_t *pico_vfs_get_vfs_ops_for_index(int index)
 {
     if (index < 0 || index >= s_vfs_count) {
         return NULL;
@@ -137,7 +159,7 @@ static const pico_vfs_entry_t *pico_vfs_get_vfs_for_fd(int fd)
 
     if (pico_vfs_valid_fd(fd)) {
         const int index = s_fd_table[fd].vfs_index;
-        vfs = get_vfs_entry_for_index(index);
+        vfs = pico_vfs_get_vfs_entry_for_index(index);
     }
     return vfs;
 }
@@ -154,10 +176,10 @@ static int pico_vfs_local_fd(const pico_vfs_entry_t *vfs, int global_fd)
     return local_fd;
 }
 
-static int pico_vfs_register_common(const char *base_path, size_t len, const pico_vfs_ops_t *ops, int *vfs_index)
+static int pico_vfs_register_common(const char *base_path, size_t len, const pico_vfs_ops_t *ops, void *drvctx, int *vfs_index)
 {
     if (len != LEN_PATH_PREFIX_IGNORED) {
-        if ((len != 0 && len < 2) || (len > ESP_VFS_PATH_MAX)) {
+        if ((len != 0 && len < 2) || (len > PICO_VFS_BASE_PATH_MAX)) {
             return EINVAL;
         }
         if ((len > 0 && base_path[0] != '/') || (len>0 && base_path[len - 1] == '/')) {
@@ -192,6 +214,7 @@ static int pico_vfs_register_common(const char *base_path, size_t len, const pic
 
     entry->path_prefix_len = len;
     entry->index = index;
+    entry->drvctx = drvctx;
 
     if (vfs_index) {
         *vfs_index = index;
@@ -200,16 +223,20 @@ static int pico_vfs_register_common(const char *base_path, size_t len, const pic
     return 0;
 }
 
-int pico_vfs_register(const char* base_path, const pico_vfs_ops_t* vfs)
+vfs_index_t pico_vfs_register(const char* base_path, const pico_vfs_ops_t* vfs, void *drvctx)
 {
-    return pico_vfs_register_common(base_path, strlen(base_path), vfs, NULL);
+    int index = -1;
+    int r = pico_vfs_register_common(base_path, strlen(base_path), vfs, drvctx, &index);
+    if (r<0)
+        return r;
+    return index;
 }
 
 int pico_vfs_register_fd_range_for_vfs_index(vfs_index_t index,
                                              int min_fd, int max_fd)
 {
     pico_vfs_table_lock();
-    for (int i = min_fd; i < max_fd; ++i) {
+    for (int i = min_fd; i <= max_fd; ++i) {
         if (s_fd_table[i].vfs_index != -1) {
 
             for (int j = min_fd; j < i; ++j) {
@@ -228,7 +255,7 @@ int pico_vfs_register_fd_range_for_vfs_index(vfs_index_t index,
     return 0;
 }
 
-int pico_vfs_register_fd_range(const pico_vfs_ops_t *vfs, int min_fd, int max_fd)
+vfs_index_t pico_vfs_register_fd_range(const pico_vfs_ops_t *vfs, void *drvctx, int min_fd, int max_fd)
 {
     if (min_fd < 0 || max_fd < 0 || min_fd > MAX_FDS || max_fd > MAX_FDS || min_fd > max_fd) {
         return EINVAL;
@@ -236,7 +263,7 @@ int pico_vfs_register_fd_range(const pico_vfs_ops_t *vfs, int min_fd, int max_fd
 
     int index = -1;
 
-    int ret = pico_vfs_register_common("", LEN_PATH_PREFIX_IGNORED, vfs, &index);
+    int ret = pico_vfs_register_common("", LEN_PATH_PREFIX_IGNORED, vfs, drvctx, &index);
 
     if (ret == 0) {
         ret = pico_vfs_register_fd_range_for_vfs_index(index, min_fd, max_fd);
@@ -267,20 +294,26 @@ int pico_vfs_register_fd_range(const pico_vfs_ops_t *vfs, int min_fd, int max_fd
 
 #define VFSCALL_R(rettype, reent, name, ...)  \
     rettype ret; \
-    if (vfs->ops.name != NULL) { \
+    if (vfs->ops.name == NULL) { \
        __errno_r(reent) = ENOSYS; \
        ret = -1; \
     } else { \
-       ret = (*vfs->ops.name)( __VA_ARGS__ );  \
+      ret = (*vfs->ops.name)( vfs->drvctx, __VA_ARGS__ );  \
+      if (ret<0) __errno_r(reent) = -ret; \
     }
 
 #define VFSCALL_R_N(rettype, reent, name, ...)  \
     rettype ret; \
-    if (vfs->ops.name != NULL) { \
+    if (vfs->ops.name == NULL) { \
        __errno_r(reent) = ENOSYS; \
        ret = NULL; \
     } else { \
-       ret = (*vfs->ops.name)( __VA_ARGS__ );  \
+       ret = (*vfs->ops.name)(vfs->drvctx, __VA_ARGS__ );  \
+    }
+
+#define VFSCALL_V(name, ...)  \
+    if (vfs->ops.name != NULL) { \
+       (*vfs->ops.name)(vfs->drvctx, __VA_ARGS__ );  \
     }
 
 #define VFS_GENERIC_REENT_CALL(rettype, name, reent, fd, ...) \
@@ -288,20 +321,82 @@ int pico_vfs_register_fd_range(const pico_vfs_ops_t *vfs, int min_fd, int max_fd
     VFSCALL_R(rettype, reent, name, local_fd, __VA_ARGS__); \
     return ret;
 
-
-off_t pico_vfs_lseek(struct _reent *r, int fd, off_t size, int mode)
-{
-    VFS_GENERIC_REENT_CALL(off_t, lseek, r, fd, size, mode );
-}
+#define VFS_GENERIC_REENT_CALL0(rettype, name, reent, fd) \
+    VFSDECL_R(fd, reent); \
+    VFSCALL_R(rettype, reent, name, local_fd); \
+    return ret;
 
 ssize_t pico_vfs_write(struct _reent *r, int fd, const void * data, size_t size)
 {
     VFS_GENERIC_REENT_CALL(ssize_t, write, r, fd, data, size);
 }
 
+int pico_vfs_close(struct _reent *r, int fd)
+{
+    VFSDECL_R(fd, r);
+    VFSCALL_R(int, r, close, local_fd);
+
+    if (ret == 0) {
+        pico_vfs_table_lock();
+        if (!s_fd_table[fd].permanent) {
+            s_fd_table[fd] = FD_TABLE_ENTRY_UNUSED;
+        }
+        pico_vfs_table_unlock();
+    }
+
+    return ret;
+}
+
+ssize_t pico_vfs_read(struct _reent *r, int fd, void * dst, size_t size)
+{
+    VFS_GENERIC_REENT_CALL(ssize_t, read, r, fd, dst, size);
+}
+
+ssize_t pico_vfs_pread(int fd, void *dst, size_t size, off_t offset)
+{
+    struct _reent* r = __getreent();
+    VFS_GENERIC_REENT_CALL(ssize_t, pread, r, fd, dst, size, offset);
+}
+
+ssize_t pico_vfs_pwrite(int fd, const void *src, size_t size, off_t offset)
+{
+    struct _reent* r = __getreent();
+    VFS_GENERIC_REENT_CALL(ssize_t, pwrite, r, fd, src, size, offset);
+}
+
+off_t pico_vfs_lseek(struct _reent *r, int fd, off_t size, int mode)
+{
+    VFS_GENERIC_REENT_CALL(off_t, lseek, r, fd, size, mode);
+}
+
+int pico_vfs_fcntl(struct _reent *r, int fd, int cmd, int arg)
+{
+    VFS_GENERIC_REENT_CALL(int, fcntl, r, fd, cmd, arg);
+}
+
+int pico_vfs_fstat(struct _reent *r, int fd, struct stat * st)
+{
+    VFS_GENERIC_REENT_CALL(int, fstat, r, fd, st);
+}
+
+int pico_vfs_fsync(int fd)
+{
+    struct _reent* r = __getreent();
+    VFS_GENERIC_REENT_CALL0(int, fsync, r, fd);
+}
+
+int pico_vfs_ioctl(int fd, int cmd, ...)
+{
+    struct _reent* r = __getreent();
+    va_list ap;
+    va_start(ap, cmd);
+    VFS_GENERIC_REENT_CALL(int, ioctl, r, fd, cmd, ap);
+    va_end(ap);
+}
+
 int pico_vfs_open(struct _reent *r, const char * path, int flags, int mode)
 {
-    const pico_vfs_entry_t* vfs = pico_vfs_get_vfs_for_path(path);
+    const pico_vfs_entry_t* vfs = pico_vfs_get_vfs_entry_for_path(path);
 
     if (vfs == NULL) {
         __errno_r(r) = ENOENT;
@@ -315,7 +410,7 @@ int pico_vfs_open(struct _reent *r, const char * path, int flags, int mode)
 
     /* ret now holds error or the vfs-local fd */
 
-    if (ret >= 0)
+    if (ret == 0)
     {
         pico_vfs_table_lock();
 
@@ -331,30 +426,22 @@ int pico_vfs_open(struct _reent *r, const char * path, int flags, int mode)
         }
 
         pico_vfs_table_unlock();
+
         do {
             VFSCALL_R(int, r, close, fd_within_vfs);
             (void)ret;
         } while (0);
-        __errno_r(r) = ENOMEM;
+
+        __errno_r(r) = ENFILE;
         return -1;
 
     }
     return ret;
 }
 
-void vfs_debug(const char *p)
-{
-    char temp[80];
-    sprintf(temp,"%s %p id %d\r\n", p, s_vfs[0], s_vfs_count);
-    stdio_vfs_write(1, temp, strlen(temp));
-}
-
 DIR* pico_vfs_opendir(const char* name)
 {
-    const pico_vfs_entry_t * vfs = pico_vfs_get_vfs_for_path(name);
-
-    printf("OPENDIR: attempt open %s, vfs %p\r\n", name, vfs);
-    printf("OPENDIR: vfs entries %d idx 0 %p\r\n", s_vfs_count, s_vfs[0]);
+    const pico_vfs_entry_t * vfs = pico_vfs_get_vfs_entry_for_path(name);
 
     struct _reent* r = __getreent();
     if (vfs == NULL) {
@@ -373,14 +460,146 @@ DIR* pico_vfs_opendir(const char* name)
     return ret;
 }
 
+int pico_vfs_closedir(DIR* pdir)
+{
+    const pico_vfs_entry_t *vfs = pico_vfs_get_vfs_entry_for_index(pdir->vfs_index);
 
-ssize_t _write_r(struct _reent *r, int fd, const void * data, size_t size) __attribute__((alias("pico_vfs_write")));
-DIR* opendir(const char* name) __attribute__((alias("pico_vfs_opendir")));
+    struct _reent* r = __getreent();
+    if (vfs == NULL) {
+        __errno_r(r) = EBADF;
+        return -1;
+    }
+    VFSCALL_R(int, r, closedir, pdir);
+    return ret;
+}
 
-static DIR* pico_vfs_root_opendir(const char* name)
+int pico_vfs_readdir_r(DIR* pdir, struct dirent* entry, struct dirent** out_dirent)
+{
+    const pico_vfs_entry_t *vfs = pico_vfs_get_vfs_entry_for_index(pdir->vfs_index);
+
+    struct _reent* r = __getreent();
+    if (vfs == NULL) {
+        __errno_r(r) = EBADF;
+        return -1;
+    }
+    VFSCALL_R(int, r, readdir_r, pdir, entry, out_dirent);
+
+    return ret;
+}
+
+struct dirent *pico_vfs_readdir(DIR* pdir)
+{
+    const pico_vfs_entry_t *vfs = pico_vfs_get_vfs_entry_for_index(pdir->vfs_index);
+
+    struct _reent* r = __getreent();
+    if (vfs == NULL) {
+        __errno_r(r) = EBADF;
+        return NULL;
+    }
+
+    VFSCALL_R_N(struct dirent*, r, readdir, pdir);
+
+    return ret;
+}
+
+
+long pico_vfs_telldir(DIR* pdir)
+{
+    const pico_vfs_entry_t *vfs = pico_vfs_get_vfs_entry_for_index(pdir->vfs_index);
+
+    struct _reent* r = __getreent();
+    if (vfs == NULL) {
+        __errno_r(r) = EBADF;
+        return -1;
+    }
+
+    VFSCALL_R(long, r, telldir, pdir);
+
+    return ret;
+}
+
+void pico_vfs_seekdir(DIR* pdir, long loc)
+{
+    const pico_vfs_entry_t *vfs = pico_vfs_get_vfs_entry_for_index(pdir->vfs_index);
+
+    if (vfs == NULL) {
+        return;
+    }
+
+    VFSCALL_V(seekdir, pdir, loc);
+
+}
+
+static DIR* pico_vfs_root_opendir(void *ctx, const char* name)
 {
     printf("ROOT_OPENDIR: attempt open %s\r\n", name);
-    return NULL;
+
+    struct _reent* r = __getreent();
+
+    if (name==NULL || name[0]=='\0') {
+        __errno_r(r) = ENOENT;
+        return NULL;
+    }
+    if ((name[0] =='/' && name[1]=='\0')) {
+
+        pico_vfs_internal_dir_t *handle = malloc(sizeof(pico_vfs_internal_dir_t));
+        handle->iter = 0;
+        handle->stream.vfs_index = 0;
+
+        return (DIR*)handle;
+
+    } else {
+        __errno_r(r) = ENOENT;
+        return NULL;
+    }
+}
+
+static int pico_vfs_root_closedir(void *ctx, DIR *d)
+{
+    if (d) {
+        free(d);
+        return 0;
+    }
+    return -EINVAL;
+}
+
+static struct dirent *pico_vfs_root_readdir(void *ctx, DIR *d)
+{
+    pico_vfs_internal_dir_t *dir = (pico_vfs_internal_dir_t*)d;
+    int cindex = dir->iter;
+    pico_vfs_entry_t *vfs = NULL;
+    const char *path;
+
+    printf("ROOT_READDIR\r\n");
+
+    if (cindex >= VFS_MAX_COUNT)
+        return NULL;
+
+    do {
+        vfs = s_vfs[cindex];
+        if ((!vfs) || (vfs->path_prefix[0]=='\0')) {
+            vfs = NULL;
+            cindex++;
+        }
+    } while (!vfs && (cindex < VFS_MAX_COUNT));
+
+    if (!vfs) {
+        return NULL;
+    }
+    path = vfs->path_prefix;
+
+    if (path[0]=='/')
+        path++;
+
+    printf("VFS: found entry %d %s\r\n", cindex, path);
+    cindex++;
+    dir->iter = cindex;
+
+    // Fill in information
+    dir->dir.d_type = DT_DIR;
+    dir->dir.d_reclen = sizeof(struct dirent);
+    strcpy(dir->dir.d_name, path);
+    return &dir->dir;
 }
 
 vfs_index_t pico_vfs_init(void)
@@ -395,6 +614,7 @@ vfs_index_t pico_vfs_init(void)
     }
     vfs_initialised = 1;
 #endif
+    mutex_init(&s_fd_table_mutex);
 
     pico_vfs_table_lock();
 
@@ -408,7 +628,9 @@ vfs_index_t pico_vfs_init(void)
     // Init root VFS, mainly for root directory iteration.
     const pico_vfs_ops_t rootops =
     {
-        .opendir = &pico_vfs_root_opendir
+        .opendir  = &pico_vfs_root_opendir,
+        .closedir = &pico_vfs_root_closedir,
+        .readdir = &pico_vfs_root_readdir
         /*struct dirent* (*readdir)(DIR* pdir);
         int (*readdir_r)(DIR* pdir, struct dirent* entry, struct dirent** out_dirent);
         long (*telldir)(DIR* pdir);
@@ -420,17 +642,39 @@ vfs_index_t pico_vfs_init(void)
     int ret = pico_vfs_register_common("",
                                        0,
                                        &rootops,
+                                       NULL,
                                        &index);
-
-    vfs_debug("l");
 
     sleep_ms(5000);
 
     if (ret<0)
         return ret;
 
-    vfs_debug("s");
-
     return index;
 }
+
+/*
+ Aliases for our VFS functions. These implement the newlib syscalls
+ */
+
+int _open_r(struct _reent *r, const char * path, int flags, int mode) __attribute__((alias("pico_vfs_open")));
+int _close_r(struct _reent *r, int fd) __attribute__((alias("pico_vfs_close")));
+ssize_t _read_r(struct _reent *r, int fd, void * dst, size_t size) __attribute__((alias("pico_vfs_read")));
+ssize_t _write_r(struct _reent *r, int fd, const void * data, size_t size) __attribute__((alias("pico_vfs_write")));
+ssize_t pread(int fd, void *dst, size_t size, off_t offset) __attribute__((alias("pico_vfs_pread")));
+ssize_t pwrite(int fd, const void *src, size_t size, off_t offset) __attribute__((alias("pico_vfs_pwrite")));
+off_t _lseek_r(struct _reent *r, int fd, off_t size, int mode) __attribute__((alias("pico_vfs_lseek")));
+int _fcntl_r(struct _reent *r, int fd, int cmd, int arg) __attribute__((alias("pico_vfs_fcntl")));
+int _fstat_r(struct _reent *r, int fd, struct stat * st) __attribute__((alias("pico_vfs_fstat")));
+int fsync(int fd) __attribute__((alias("pico_vfs_fsync")));
+int ioctl(int fd, int cmd, ...) __attribute__((alias("pico_vfs_ioctl")));
+
+
+DIR* opendir(const char* name) __attribute__((alias("pico_vfs_opendir")));
+int closedir(DIR* pdir) __attribute__((alias("pico_vfs_closedir")));
+int readdir_r(DIR* pdir, struct dirent* entry, struct dirent** out_dirent) __attribute__((alias("pico_vfs_readdir_r")));
+struct dirent* readdir(DIR* pdir) __attribute__((alias("pico_vfs_readdir")));
+long telldir(DIR* pdir) __attribute__((alias("pico_vfs_telldir")));
+void seekdir(DIR* pdir, long loc) __attribute__((alias("pico_vfs_seekdir")));
+
 

@@ -169,7 +169,7 @@ int puts_raw(const char *s) {
 }
 
 #if LIB_PICO_VFS
-ssize_t stdio_vfs_read(int handle, void *buffer, size_t length) {
+ssize_t stdio_vfs_read(void *ctx, int handle, void *buffer, size_t length) {
 #else
 int _read(int handle, char *buffer, int length) {
 #endif
@@ -180,7 +180,7 @@ int _read(int handle, char *buffer, int length) {
 }
 
 #if LIB_PICO_VFS
-ssize_t stdio_vfs_write(int handle, const void *buffer, size_t length) {
+ssize_t stdio_vfs_write(void *ctx, int handle, const void *buffer, size_t length) {
 #else
 int _write(int handle, char *buffer, int length) {
 #endif
@@ -276,18 +276,13 @@ int __printflike(1, 0) WRAPPER_FUNC(printf)(const char* format, ...)
 #if LIB_PICO_VFS
 static void stdio_init_vfs()
 {
-    const pico_vfs_ops_t stdio_vfs_ops = {
-        .read = &stdio_vfs_read,
-        .write= &stdio_vfs_write
-    };
-
     vfs_index_t rootindex = pico_vfs_init();
 
     if (rootindex == 0)
     {
         if (pico_vfs_register_fd_range_for_vfs_index(rootindex, 0, 1) ==0)
         {
-            pico_vfs_ops_t *ops = pico_vfs_get_vfs_for_index(rootindex);
+            pico_vfs_ops_t *ops = pico_vfs_get_vfs_ops_for_index(rootindex);
 
             if (ops) {
                 ops->read = &stdio_vfs_read;
