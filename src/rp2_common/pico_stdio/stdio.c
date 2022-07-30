@@ -33,6 +33,10 @@
 #include "pico/stdio_semihosting.h"
 #endif
 
+#define STDIO_HANDLE_STDIN  0
+#define STDIO_HANDLE_STDOUT 1
+#define STDIO_HANDLE_STDERR 2
+
 static stdio_driver_t *drivers;
 static stdio_driver_t *filter;
 
@@ -135,11 +139,13 @@ static int stdio_get_until(char *buf, int len, absolute_time_t until) {
                 }
             }
         }
+        if (time_reached(until)) {
+            return PICO_ERROR_TIMEOUT;
+        }
         // we sleep here in case the in_chars methods acquire mutexes or disable IRQs and
         // potentially starve out what they are waiting on (have seen this with USB)
         busy_wait_us(1);
-    } while (!time_reached(until));
-    return PICO_ERROR_TIMEOUT;
+    } while (true);
 }
 
 int WRAPPER_FUNC(putchar)(int c) {
@@ -173,8 +179,8 @@ ssize_t stdio_vfs_read(void *ctx, int handle, void *buffer, size_t length) {
 #else
 int _read(int handle, char *buffer, int length) {
 #endif
-    if (handle == 0) {
-        return stdio_get_until((char*)buffer, length, at_the_end_of_time);
+    if (handle == STDIO_HANDLE_STDIN) {
+        return stdio_get_until(buffer, length, at_the_end_of_time);
     }
     return -1;
 }
@@ -184,8 +190,8 @@ ssize_t stdio_vfs_write(void *ctx, int handle, const void *buffer, size_t length
 #else
 int _write(int handle, char *buffer, int length) {
 #endif
-    if (handle == 1) {
-        stdio_put_string((const char*)buffer, length, false, false);
+    if (handle == STDIO_HANDLE_STDOUT || handle == STDIO_HANDLE_STDERR) {
+        stdio_put_string(buffer, length, false, false);
         return length;
     }
     return -1;
