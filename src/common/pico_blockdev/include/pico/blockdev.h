@@ -22,6 +22,7 @@ typedef struct
 struct pico_blockdev__
 {
     const pico_blockdev_ops_t *ops;
+    struct pico_blockdev__ *parent;
     /* Other dev-specific data below */
 };
 

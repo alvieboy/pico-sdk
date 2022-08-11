@@ -25,5 +25,13 @@ int pico_blockdev_ioctl(pico_blockdev_t *dev, unsigned char cmd, void* data)
     } else {
         return -1;
     }
+}
 
+int pico_blockdev_init(pico_blockdev_t *dev)
+{
+    if (dev->ops->init) {
+        return (*dev->ops->init)(dev);
+    } else {
+        return -1;
+    }
 }

@@ -12,6 +12,8 @@ if (NOT PICO_BARE_METAL)
     pico_add_subdirectory(pico_time)
     pico_add_subdirectory(pico_util)
     pico_add_subdirectory(pico_stdlib)
+    pico_add_subdirectory(pico_vfs)
+    pico_add_subdirectory(pico_blockdev)
 endif()
 
 pico_add_doxygen(${CMAKE_CURRENT_LIST_DIR})
