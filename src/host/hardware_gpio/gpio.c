@@ -41,6 +41,7 @@ void *gpio_add_listener(uint gpionum, void (*callback)(void*,uint,uint),
     e->gpio_changed_callback = callback;
     e->next = gpios[gpionum].listeners;
     gpios[gpionum].listeners = e;
+    return e;
 }
 
 static int evaluate_gpio_value(uint gpio)
