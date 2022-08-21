@@ -175,7 +175,8 @@ int puts_raw(const char *s) {
 }
 
 #if LIB_PICO_VFS
-ssize_t stdio_vfs_read(void *ctx, int handle, void *buffer, size_t length) {
+ssize_t stdio_vfs_read(void *ctx, vfs_fd_t fd, void *buffer, size_t length) {
+    int handle = fd.fd;
 #else
 int _read(int handle, char *buffer, int length) {
 #endif
@@ -186,7 +187,8 @@ int _read(int handle, char *buffer, int length) {
 }
 
 #if LIB_PICO_VFS
-ssize_t stdio_vfs_write(void *ctx, int handle, const void *buffer, size_t length) {
+ssize_t stdio_vfs_write(void *ctx, vfs_fd_t fd, const void *buffer, size_t length) {
+    int handle = fd.fd;
 #else
 int _write(int handle, char *buffer, int length) {
 #endif
