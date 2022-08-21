@@ -43,6 +43,8 @@ int pico_blockdev_ioctl(pico_blockdev_t *dev, unsigned char cmd, void* data);
 int pico_blockdev_init(pico_blockdev_t *dev);
 int pico_blockdev_get_children(pico_blockdev_t *dev);
 
+int pico_blockdev_register(pico_blockdev_t *dev);
+
 void pico_blockdev_register_event(pico_blockdev_t *dev);
 void pico_blockdev_unregister_event(pico_blockdev_t *dev);
 
