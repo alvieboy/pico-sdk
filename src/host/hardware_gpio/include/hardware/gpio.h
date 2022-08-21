@@ -167,6 +167,20 @@ void gpio_set_dir(uint gpio, bool out);
 
 void gpio_debug_pins_init();
 
+void *gpio_add_listener(uint gpionum, void (*callback)(void*,uint,uint),
+                        void *user);
+
+typedef enum
+{
+    GPIO_EXTERNAL_FLOAT,
+    GPIO_EXTERNAL_PULLUP,
+    GPIO_EXTERNAL_PULLDOWN,
+    GPIO_EXTERNAL_DRIVE_LOW,
+    GPIO_EXTERNAL_DRIVE_HIGH
+} gpio_drive_t;
+
+void gpio_set_external_drive(uint gpionum, gpio_drive_t drive);
+
 #ifdef __cplusplus
 }
 #endif
