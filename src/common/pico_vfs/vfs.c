@@ -15,6 +15,7 @@
 
 #include <stdio.h>
 #include <pico/sync.h>
+#include <pico/platform.h>
 
 #define MAX_FDS 16
 #define VFS_MAX_COUNT 4
@@ -229,15 +230,11 @@ static int pico_vfs_register_common(const char *base_path, size_t len, const pic
     return 0;
 }
 
-#include <pico/platform.h>
-
-PICO_WEAK_FUNCTION_DEF(pico_vfs_register_event);
-void PICO_WEAK_FUNCTION_IMPL_NAME(pico_vfs_register_event)(const char *base_path)
+void __attribute__((weak)) pico_vfs_register_event(const char *base_path)
 {
 }
 
-PICO_WEAK_FUNCTION_DEF(pico_vfs_deregister_event);
-void PICO_WEAK_FUNCTION_IMPL_NAME(pico_vfs_deregister_event)(const char *base_path)
+void __attribute__((weak)) pico_vfs_deregister_event(const char *base_path)
 {
 }
 
@@ -446,12 +443,12 @@ int pico_vfs_open(struct _reent *r, const char * path, int flags, int mode)
     int ret;
 
     if (vfs->ops.open == NULL) {
-        __errno_r(reent) = ENOSYS;
+        __errno_r(r) = ENOSYS;
         ret = -1;
     } else {
         ret = (*vfs->ops.open)( vfs->drvctx, &fd_within_vfs, path_within_vfs, flags, mode );
         if (ret<0) {
-            __errno_r(reent) = -ret;
+            __errno_r(r) = -ret;
         }
     }
     /* ret now holds error or the vfs-local fd */
