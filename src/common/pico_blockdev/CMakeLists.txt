@@ -9,6 +9,7 @@ if (NOT TARGET pico_blockdev)
     
     target_sources(pico_blockdev INTERFACE
         ${CMAKE_CURRENT_LIST_DIR}/blockdev.c
+        ${CMAKE_CURRENT_LIST_DIR}/partition.c
     )
     
     target_include_directories(pico_blockdev INTERFACE ${CMAKE_CURRENT_LIST_DIR}/include)

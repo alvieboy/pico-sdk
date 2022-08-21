@@ -23,6 +23,7 @@ struct pico_blockdev__
 {
     const pico_blockdev_ops_t *ops;
     struct pico_blockdev__ *parent;
+    uint8_t childs;
     /* Other dev-specific data below */
 };
 
@@ -30,15 +31,20 @@ struct pico_blockdev__
 /*
  Supported IOCTLs
  */
-#define PICO_IOCTL_BLKGETSIZE (0) /* Get device size in sectors */
-#define PICO_IOCTL_BLKSSZGET (1)  /* Get sector size in bytes */
-#define PICO_IOCTL_BLKROGET (2)   /* Get readonly flag */
-#define PICO_IOCTL_BLKFLSBUF (3)  /* Sync */
+#define PICO_IOCTL_BLKGETSIZE (0)  /* Get device size in sectors */
+#define PICO_IOCTL_BLKSSZGET (1)   /* Get sector size in bytes */
+#define PICO_IOCTL_BLKROGET (2)    /* Get readonly flag */
+#define PICO_IOCTL_BLKFLSBUF (3)   /* Sync */
+#define PICO_IOCTL_HDIO_GETGEO (4)
 
 int pico_blockdev_read_sector(pico_blockdev_t *dev, unsigned char* data, uint32_t start_sector, unsigned count);
 int pico_blockdev_write_sector(pico_blockdev_t *dev, const unsigned char* data, uint32_t start_sector, unsigned count);
 int pico_blockdev_ioctl(pico_blockdev_t *dev, unsigned char cmd, void* data);
 int pico_blockdev_init(pico_blockdev_t *dev);
+int pico_blockdev_get_children(pico_blockdev_t *dev);
+
+void pico_blockdev_register_event(pico_blockdev_t *dev);
+void pico_blockdev_unregister_event(pico_blockdev_t *dev);
 
 // Debug
 #define BLKDEV_INFO(drv, x...)
