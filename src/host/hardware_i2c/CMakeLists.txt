@@ -1,0 +1,2 @@
+pico_simple_hardware_target(i2c)
+
