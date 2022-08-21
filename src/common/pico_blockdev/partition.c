@@ -1,4 +1,5 @@
 #include "pico/blockdev.h"
+#include <stdlib.h>
 
 struct msdos_partition {
     uint8_t boot_ind;
@@ -16,7 +17,7 @@ struct msdos_partition {
 
 typedef struct pico_blockdev_part__
 {
-    struct pico_blockdev_ops_t *ops;
+    const pico_blockdev_ops_t *ops;
     struct pico_blockdev__ *parent;
     uint32_t start_sector;
     uint32_t num_sectors;
@@ -45,7 +46,6 @@ static int pico_blockdev_part_init(pico_blockdev_t *dev)
 static int pico_blockdev_part_read_sector(pico_blockdev_t *dev, unsigned char* data, uint32_t start_sector, unsigned count)
 {
     pico_blockdev_part_t *d = (pico_blockdev_part_t*)dev;
-    printf("Part read sector %d %d\n",  start_sector , start_sector + d->start_sector);
     if (d->parent->ops->read_sector)
         return d->parent->ops->read_sector(d->parent, data, start_sector + d->start_sector, count);
     return -1;
@@ -109,13 +109,11 @@ void pico_blockdev_scan_partitions(pico_blockdev_t *dev)
 {
     uint8_t sect[512];
     int r = pico_blockdev_read_sector(dev, sect, 0, 1);
-    printf("Read part: %d\n", r);
     if (r==0) {
         // Scan partitions
         if (sect[510]==0x55 && sect[511]==0xAA)
         {
             for (int i=0; i<4; i++) {
-                printf("Check part: %d\n", i);
                 pico_blockdev_check_msdos_partition(dev, &sect[0x1be], i);
             }
         }
